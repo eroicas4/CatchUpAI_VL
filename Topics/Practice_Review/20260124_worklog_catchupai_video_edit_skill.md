@@ -2,7 +2,7 @@
 
 ## 작업 개요
 - **프로젝트**: CatchUpAI Video Edit Skill 테스트
-- **작업 내용**: video-editor.py를 사용한 무음 구간 제거 (음량 기반, --min-silence 1000ms)
+- **작업 내용**: video-editor.py를 사용한 무음 구간 제거 (음량 기반, --min-silence 1000ms, 300ms)
 - **사용한 스크립트**: `video-editor.py` (select 필터 방식)
 - **입력 파일**: `original.mkv` (92.2분, 363.7MB)
 - **출력 파일**: `original_edited.mkv` (68.9분, 272.5MB)
@@ -14,11 +14,12 @@
 
 | 구분 | 시작 | 종료 | 소요 시간 |
 |------|------|------|----------|
-| **영상 편집** | 11:04:48 | 12:31:40 | **1시간 26분 52초** |
+| **테스트 1** (1000ms) | 11:04:48 | 12:31:40 | **1시간 26분 52초** |
+| **테스트 2** (300ms) | 13:37:17 | 15:44:28 | **2시간 07분 11초** |
 
 ---
 
-## 실험 결과
+## 테스트 1: --min-silence 1000 (1초)
 
 | 항목 | 원본 | 편집 후 | 변화 |
 |------|------|---------|------|
@@ -33,7 +34,23 @@
 
 ---
 
-## 묶음별 처리 결과
+## 테스트 2: --min-silence 300 (0.3초)
+
+| 항목 | 원본 | 편집 후 | 변화 |
+|------|------|---------|------|
+| 길이 | 92.2분 (01:32:14) | 61.9분 (01:01:52) | **-32.9%** |
+| 크기 | 363.7MB | 252.6MB | -30.6% |
+| 무음 구간 | 2,273개 | - | 37.9분 제거 |
+| 유지 구간 | 2,274개 | - | 2,274개 유지 |
+
+- **실험 성공**: video-editor.py로 무음 제거 완료
+- **무음 기준**: 음량 -40dB 이하, 최소 길이 300ms (`--min-silence 300`)
+- **필러 단어**: 제거 안 함 (옵션 미사용)
+- **처리**: 2,274개 구간을 23개 묶음으로 분할 처리
+
+---
+
+## 테스트 1 묶음별 처리 결과
 
 762개 구간을 100개씩 8개 묶음으로 분할 처리함.
 
@@ -48,6 +65,28 @@
 | 7/8 | 100개 | 862.1초 | OK |
 | 8/8 | 62개 | 458.1초 | OK |
 | **합계** | **762개** | **4,136.2초** | **OK** |
+
+---
+
+## min-silence 파라미터별 비교 (300ms vs 1000ms)
+
+동일한 영상에서 `--min-silence` 값만 다르게 설정한 결과 비교:
+
+| 항목 | 1000ms (1초) | 300ms (0.3초) | 차이 |
+|------|-------------|--------------|------|
+| **편집 후 길이** | 68.9분 | 61.9분 | -7분 |
+| **단축 비율** | 25.3% | **32.9%** | +7.6%p |
+| **감지된 무음** | 761개 | **2,273개** | +1,512개 |
+| **유지 구간** | 762개 | 2,274개 | +1,512개 |
+| **묶음 수** | 8개 | 23개 | +15개 |
+| **처리 시간** | 1시간 27분 | **2시간 7분** | +40분 |
+| **파일 크기** | 272.5MB | 252.6MB | -19.9MB |
+
+**분석**:
+- 300ms 설정은 1000ms 대비 **3배 많은 무음 구간**을 감지 (2,273개 vs 761개)
+- 단축 비율 **7.6%p 증가** (25.3% → 32.9%)
+- 처리 시간은 구간 수 증가로 **40분 더 소요**
+- 짧은 쉼까지 제거되어 **급한 느낌**이 될 수 있음
 
 ---
 
@@ -75,6 +114,7 @@
 
 ## 사용된 명령어
 
+### 테스트 1 (1000ms)
 ```bash
 python "c:\AI_study\2026\CatchUpAI_VL\Topics\Claude-Skills\04-Skill-C-Video-Edit\examples\video-editor.py" \
   "C:\Users\dougg\Videos\Youtube\2026\PKM_Project\20260122_with_Jin_Prompt_Skills\select_filter_1000\original.mkv" \
@@ -82,9 +122,18 @@ python "c:\AI_study\2026\CatchUpAI_VL\Topics\Claude-Skills\04-Skill-C-Video-Edit
   --min-silence 1000
 ```
 
+### 테스트 2 (300ms)
+```bash
+python "c:\AI_study\2026\CatchUpAI_VL\Topics\Claude-Skills\04-Skill-C-Video-Edit\examples\video-editor.py" \
+  "C:\Users\dougg\Videos\Youtube\2026\PKM_Project\20260122_with_Jin_Prompt_Skills\select_filter_300\original.mkv" \
+  --remove-silence \
+  --min-silence 300
+```
+
 **옵션 설명**:
 - `--remove-silence`: 무음 구간 제거 활성화
 - `--min-silence 1000`: 1000ms (1초) 이상의 무음 구간만 제거
+- `--min-silence 300`: 300ms (0.3초) 이상의 무음 구간 제거 (더 공격적)
 
 ---
 
@@ -92,6 +141,7 @@ python "c:\AI_study\2026\CatchUpAI_VL\Topics\Claude-Skills\04-Skill-C-Video-Edit
 
 1. **select 필터 안정성**:
    - 762개 구간을 8개 묶음(100개씩)으로 분할 처리
+   - 2,274개 구간을 23개 묶음으로 분할 처리 (300ms 테스트)
    - 모든 묶음 처리 성공, 안정적인 결과
 
 2. **진행 상황 실시간 표시**:
@@ -99,21 +149,36 @@ python "c:\AI_study\2026\CatchUpAI_VL\Topics\Claude-Skills\04-Skill-C-Video-Edit
    - 각 묶음별 진행 상황 확인 가능
 
 3. **무음 감지 방식 차이 재확인**:
-   - 음량 기반 (pydub): 짧은 쉼도 감지, 공격적 편집 (25.3% 단축)
+   - 음량 기반 (pydub): 짧은 쉼도 감지, 공격적 편집 (25.3~32.9% 단축)
    - 단어 타임스탬프 (Whisper): 보수적 편집 (12.1% 단축)
 
-4. **비용 vs 시간 트레이드오프**:
-   - video-editor.py: 무료, 1시간 27분 소요
+4. **min-silence 파라미터 영향**:
+   - 1000ms → 300ms 변경 시 감지 무음 **3배 증가** (761개 → 2,273개)
+   - 단축률 **7.6%p 증가** (25.3% → 32.9%)
+   - 처리 시간 **40분 증가** (1시간 27분 → 2시간 7분)
+   - 짧은 값일수록 공격적 편집, 급한 느낌 가능성 증가
+
+5. **비용 vs 시간 트레이드오프**:
+   - video-editor.py: 무료, 1~2시간 소요 (설정에 따라)
    - AI4PKM: $0.55, 50분 소요
 
 ---
 
 ## 생성된 파일
 
+### 테스트 1 (1000ms)
 ```
 C:\Users\dougg\Videos\Youtube\2026\PKM_Project\20260122_with_Jin_Prompt_Skills\select_filter_1000\
 ├── original.mkv              (원본, 363.7MB)
-├── original_edited.mkv       (편집 완료, 272.5MB)
+├── original_edited.mkv       (편집 완료, 272.5MB, 68.9분)
+└── original_edited_report.md (편집 보고서)
+```
+
+### 테스트 2 (300ms)
+```
+C:\Users\dougg\Videos\Youtube\2026\PKM_Project\20260122_with_Jin_Prompt_Skills\select_filter_300\
+├── original.mkv              (원본, 363.7MB)
+├── original_edited.mkv       (편집 완료, 252.6MB, 61.9분)
 └── original_edited_report.md (편집 보고서)
 ```
 
@@ -121,7 +186,11 @@ C:\Users\dougg\Videos\Youtube\2026\PKM_Project\20260122_with_Jin_Prompt_Skills\s
 
 ## 다음 작업
 
-- [ ] 두 방식의 결과물 품질 비교 (실제 시청 후 평가)
-- [ ] video-editor.py에 `--min-silence 500` 옵션으로 더 공격적인 편집 테스트
+- [ ] 세 가지 결과물 품질 비교 (실제 시청 후 평가)
+  - 1000ms: 68.9분 (25.3% 단축)
+  - 300ms: 61.9분 (32.9% 단축)
+  - AI4PKM: 81.0분 (12.1% 단축)
+- [x] ~~video-editor.py에 `--min-silence 300` 옵션으로 더 공격적인 편집 테스트~~ (**완료**)
 - [ ] AI4PKM Skill의 필러 단어 제거 기능 테스트
-- [ ] 최적의 무음 기준값 찾기 (500ms vs 1000ms vs 1500ms)
+- [ ] 500ms 테스트로 중간 지점 확인
+- [ ] 최적의 무음 기준값 결정 (자연스러움 vs 단축률 균형점)
