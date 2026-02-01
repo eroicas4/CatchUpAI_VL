@@ -73,8 +73,11 @@ def detect_silence_ffmpeg(input_path, threshold_db=-40, min_duration=0.3):
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=600)
         output = result.stderr
+
+        if output is None:
+            output = ""
 
         # 무음 구간 파싱
         silence_starts = []

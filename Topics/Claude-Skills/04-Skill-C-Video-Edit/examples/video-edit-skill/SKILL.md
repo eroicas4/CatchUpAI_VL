@@ -147,6 +147,7 @@ python video-editor.py "audio.mp3" --remove-fillers --model base --language ko
 - 제거된 필러: 28개 단어
 ```
 
+
 ### 예시 3: 모두 제거 (권장)
 
 ```
