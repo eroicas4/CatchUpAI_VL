@@ -244,85 +244,170 @@ def edit_audio(audio, keep_ranges):
     return edited
 
 
+def extract_ffmpeg_error(stderr_text):
+    """FFmpeg stderr에서 핵심 에러 메시지만 추출"""
+    error_keywords = ['error', 'invalid', 'failed', 'cannot', 'no such', 'not found', 'unable']
+    error_lines = []
+
+    for line in stderr_text.split('\n'):
+        line_lower = line.lower()
+        if any(keyword in line_lower for keyword in error_keywords):
+            error_lines.append(line.strip())
+
+    if error_lines:
+        return '\n'.join(error_lines[-5:])  # 마지막 5개 에러만 표시
+    return stderr_text[-500:] if len(stderr_text) > 500 else stderr_text
+
+
 def edit_video_ffmpeg(input_path, output_path, keep_ranges):
-    """FFmpeg를 사용하여 영상 편집 (필터 파일 방식으로 Windows 명령줄 길이 제한 우회)"""
+    """FFmpeg를 사용하여 영상 편집 (구간 분할 처리 및 병합으로 안정성/효율성 개선)"""
     import re
+    import math
+    import shutil
+
     print(f"\n[5/5] 영상 편집 중 (FFmpeg)...")
 
-    if len(keep_ranges) > 100:
-        print(f"      [Warning] 구간이 너무 많음 ({len(keep_ranges)}개) - 처리 시간이 오래 걸릴 수 있습니다")
+    if not keep_ranges:
+        print("      [Info] 유지할 구간이 없어 편집을 건너뜁니다.")
+        return False
 
-    # FFmpeg filter_complex 생성
-    filter_parts = []
-    concat_parts = []
-
-    for i, (start, end) in enumerate(keep_ranges):
-        start_sec = start / 1000
-        end_sec = end / 1000
-        filter_parts.append(f"[0:v]trim=start={start_sec}:end={end_sec},setpts=PTS-STARTPTS[v{i}];")
-        filter_parts.append(f"[0:a]atrim=start={start_sec}:end={end_sec},asetpts=PTS-STARTPTS[a{i}];")
-        concat_parts.append(f"[v{i}][a{i}]")
-
-    filter_complex = "".join(filter_parts)
-    filter_complex += "".join(concat_parts)
-    filter_complex += f"concat=n={len(keep_ranges)}:v=1:a=1[outv][outa]"
-
-    # 항상 필터를 파일로 저장 (Windows 명령줄 길이 제한 우회)
-    filter_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
-    filter_file.write(filter_complex)
-    filter_file.close()
-    print(f"      필터 파일: {filter_file.name}")
-
-    cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-filter_complex_script", filter_file.name,
-        "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
-        output_path
-    ]
-
-    print(f"      FFmpeg 실행 중... (구간 수: {len(keep_ranges)})")
+    # 임시 디렉터리 생성
+    temp_dir = tempfile.mkdtemp(prefix="ffmpeg_chunks_")
+    print(f"      임시 폴더 생성: {temp_dir}")
 
     try:
-        # Popen 사용하여 진행 상황 표시
+        # 1. 구간 분할 처리
+        CHUNK_SIZE = 100  # 한 번에 처리할 구간 수
+        num_chunks = math.ceil(len(keep_ranges) / CHUNK_SIZE)
+        temp_video_files = []
+
+        # 각 청크의 예상 시간 계산 (진행률 표시용)
+        chunk_durations = []
+        for i in range(num_chunks):
+            chunk_start = i * CHUNK_SIZE
+            chunk_end = min(chunk_start + CHUNK_SIZE, len(keep_ranges))
+            chunk_ranges = keep_ranges[chunk_start:chunk_end]
+            chunk_duration = sum(end - start for start, end in chunk_ranges) / 1000  # 초 단위
+            chunk_durations.append(chunk_duration)
+
+        print(f"      {len(keep_ranges)}개 구간을 {num_chunks}개 묶음으로 분할 처리합니다.")
+
+        for i in range(num_chunks):
+            chunk_start = i * CHUNK_SIZE
+            chunk_end = min(chunk_start + CHUNK_SIZE, len(keep_ranges))
+            chunk_ranges = keep_ranges[chunk_start:chunk_end]
+            chunk_duration = chunk_durations[i]
+
+            temp_part_path = os.path.join(temp_dir, f"part_{i:04d}.mkv")
+            print(f"\n      - 묶음 {i+1}/{num_chunks}: {len(chunk_ranges)}개 구간 ({chunk_duration:.1f}초)")
+
+            select_expr = "+".join([f"between(t,{start/1000},{end/1000})" for start, end in chunk_ranges])
+            filter_complex = f"[0:v]select='{select_expr}',setpts=N/FRAME_RATE/TB[v];[0:a]aselect='{select_expr}',asetpts=N/SR/TB[a]"
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as filter_file:
+                filter_file.write(filter_complex)
+                filter_file_name = filter_file.name
+
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-filter_complex_script", filter_file_name,
+                "-map", "[v]", "-map", "[a]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                temp_part_path
+            ]
+
+            # 진행 상황 실시간 표시
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='ignore'
+            )
+
+            stderr_output = []
+            last_progress = ""
+
+            # stderr를 실시간으로 읽어서 진행 상황 표시
+            while True:
+                line = process.stderr.readline()
+                if not line and process.poll() is not None:
+                    break
+                stderr_output.append(line)
+
+                # FFmpeg 진행 상황 파싱 (time=00:00:00.00 형식)
+                time_match = re.search(r'time=(\d{2}:\d{2}:\d{2}\.\d{2})', line)
+                if time_match:
+                    current_time = time_match.group(1)
+                    # 시간을 초로 변환
+                    parts = current_time.split(':')
+                    current_seconds = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+
+                    if chunk_duration > 0:
+                        progress_pct = min(100, (current_seconds / chunk_duration) * 100)
+                        progress_str = f"        진행: {current_time} / {chunk_duration:.1f}초 ({progress_pct:.1f}%)"
+
+                        # 같은 줄에 업데이트 (carriage return)
+                        if progress_str != last_progress:
+                            print(f"\r{progress_str}", end='', flush=True)
+                            last_progress = progress_str
+
+            # 줄바꿈으로 진행 상황 표시 마무리
+            if last_progress:
+                print()  # 새 줄로 이동
+
+            os.unlink(filter_file_name)
+            stderr_text = ''.join(stderr_output)
+
+            if process.returncode != 0:
+                print(f"        [Error] 묶음 {i+1} 처리 실패:")
+                print(f"        {extract_ffmpeg_error(stderr_text)}")
+                raise RuntimeError(f"FFmpeg 묶음 {i+1} 처리 중 오류 발생")
+
+            print(f"        [OK] 묶음 {i+1} 완료")
+            temp_video_files.append(temp_part_path)
+
+        # 2. 최종 병합
+        print("\n      모든 묶음 처리 완료. 최종 파일로 병합합니다...")
+        concat_list_path = os.path.join(temp_dir, "concat_list.txt")
+        with open(concat_list_path, 'w', encoding='utf-8') as f:
+            for video_file in temp_video_files:
+                # FFmpeg concat demuxer는 경로에 역슬래시가 있으면 오류 발생 가능
+                f.write(f"file '{video_file.replace(os.sep, '/')}'\n")
+
+        concat_cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
+            "-c", "copy",  # 재인코딩 없이 빠른 속도로 복사
+            output_path
+        ]
+
         process = subprocess.Popen(
-            cmd,
+            concat_cmd,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True
+            text=True,
+            encoding='utf-8',
+            errors='ignore'
         )
-
-        # 진행 상황 모니터링
-        last_time = ""
-        for line in process.stderr:
-            if 'time=' in line:
-                match = re.search(r'time=(\S+)', line)
-                if match and match.group(1) != last_time:
-                    last_time = match.group(1)
-                    print(f"\r      진행: {last_time}", end='', flush=True)
-
-        process.wait()
-        print()  # 줄바꿈
-
-        # 임시 필터 파일 정리
-        if os.path.exists(filter_file.name):
-            os.unlink(filter_file.name)
+        _, stderr = process.communicate()
 
         if process.returncode != 0:
-            raise RuntimeError("FFmpeg 실행 실패")
-
-        if not os.path.exists(output_path):
-            raise RuntimeError("출력 파일이 생성되지 않았습니다.")
+            print("        [Error] 최종 파일 병합 실패:")
+            print(f"        {extract_ffmpeg_error(stderr)}")
+            raise RuntimeError("FFmpeg 최종 병합 중 오류 발생")
 
         print(f"      [OK] 영상 편집 완료!")
         return True
 
-    except Exception as e:
-        if os.path.exists(filter_file.name):
-            os.unlink(filter_file.name)
-        if isinstance(e, RuntimeError):
-            raise
-        raise RuntimeError(f"FFmpeg 오류: {e}")
+    except KeyboardInterrupt:
+        print("\n[Info] 사용자에 의해 작업이 중단되었습니다.")
+        raise
+    finally:
+        # 3. 자동 정리
+        print(f"      임시 폴더 및 파일 정리: {temp_dir}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def save_audio(audio, output_path):
@@ -339,7 +424,8 @@ def save_audio(audio, output_path):
 
 
 def generate_report(input_path, output_path, original_duration, edited_duration,
-                   silence_ranges, filler_ranges, keep_ranges):
+                   silence_ranges, filler_ranges, keep_ranges,
+                   start_time=None, end_time=None, elapsed_time=None):
     """편집 결과 보고서 생성"""
     saved_time = original_duration - edited_duration
     saved_ratio = (saved_time / original_duration * 100) if original_duration > 0 else 0
@@ -377,6 +463,18 @@ def generate_report(input_path, output_path, original_duration, edited_duration,
         print(f"  - 편집 후:      {edited_size/1024/1024:>10.1f} MB")
         print(f"  - 크기 비율:    {size_ratio:>10.1f}%")
 
+    # 작업 시간 정보 출력
+    if start_time and end_time and elapsed_time:
+        total_seconds = int(elapsed_time.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        print(f"\n  [작업 시간]")
+        print(f"  - 시작:         {start_time.strftime('%Y-%m-%d %H:%M:%S'):>19}")
+        print(f"  - 종료:         {end_time.strftime('%Y-%m-%d %H:%M:%S'):>19}")
+        print(f"  - 소요 시간:    {elapsed_str:>19}")
+
     print("\n" + "=" * 70)
 
     # 마크다운 보고서 생성
@@ -410,6 +508,24 @@ def generate_report(input_path, output_path, original_duration, edited_duration,
         f"| 필러 단어 | {len(filler_ranges)} | {format_duration(filler_time)} |",
         f"",
     ]
+
+    # 작업 시간 정보 추가
+    if start_time and end_time and elapsed_time:
+        total_seconds = int(elapsed_time.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        report_lines.extend([
+            f"## 작업 시간",
+            f"",
+            f"| 항목 | 값 |",
+            f"|------|------|",
+            f"| 시작 시각 | {start_time.strftime('%Y-%m-%d %H:%M:%S')} |",
+            f"| 종료 시각 | {end_time.strftime('%Y-%m-%d %H:%M:%S')} |",
+            f"| 소요 시간 | {elapsed_str} |",
+            f"",
+        ])
 
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(report_lines))
@@ -462,6 +578,10 @@ def main():
 
     print_header()
 
+    # 작업 시작 시간 기록
+    start_time = datetime.now()
+    print(f"\n  [작업 시작] {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
     try:
         # 1. 오디오 로드
         audio = load_audio(args.file)
@@ -510,12 +630,23 @@ def main():
             edited_audio = edit_audio(audio, keep_ranges)
             save_audio(edited_audio, output_path)
 
-        # 7. 결과 보고서
+        # 7. 작업 종료 시간 기록
+        end_time = datetime.now()
+        elapsed_time = end_time - start_time
+
+        # 소요 시간을 읽기 쉬운 형식으로 변환
+        total_seconds = int(elapsed_time.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        elapsed_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        # 8. 결과 보고서
         edited_duration = sum(end - start for start, end in keep_ranges)
         generate_report(
             args.file, output_path,
             original_duration, edited_duration,
-            silence_ranges, filler_ranges, keep_ranges
+            silence_ranges, filler_ranges, keep_ranges,
+            start_time, end_time, elapsed_time
         )
 
         print(f"\n  [완료] 편집이 완료되었습니다!")
