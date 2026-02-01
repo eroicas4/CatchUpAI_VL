@@ -1,3 +1,8 @@
 nul
 Topics/Claude-Skills/temp-claude-obsidian-skills/
 Topics/Claude-Skills/CHANGELOG_KDW.md
+.claude/
+Topics/Claude-Skills/03-Skill-B-YouTube-MD/examples/UPDATE_SUMMARY.md
+Topics/Claude-Skills/03-Skill-B-YouTube-MD/examples/__pycache__/
+Topics/Claude-Skills/03-Skill-B-YouTube-MD/examples/outputs/markdown/
+Topics/Claude-Skills/04-Skill-C-Video-Edit/examples/test_simple.mp3
